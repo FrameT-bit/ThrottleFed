@@ -50,9 +50,17 @@ class Channel:
 
     `target` is what the privileged helper receives: a whitelisted path or a
     pseudo-target the helper knows how to resolve and validate.
+
+    A channel is one of two kinds, and the firmware decides which: a list of values
+    (enum, drawn as a picker) or a number. A range drawn as a picker would mean
+    inventing the values in between it; a list drawn as a number field would mean
+    accepting values the firmware never offered. `lo` and `hi` are filled in only
+    when the machine publishes them, and firmware that publishes neither still gets
+    a number field, because the driver is the one that checks it.
     """
 
-    def __init__(self, key, label, target, values=None, why="", group="Firmware", role=""):
+    def __init__(self, key, label, target, values=None, why="", group="Firmware", role="",
+                 number=False, lo=None, hi=None, unit=""):
         self.key = key
         self.label = label
         self.target = target
@@ -60,6 +68,14 @@ class Channel:
         self.why = why
         self.group = group
         self.role = role
+        self.number = bool(number)
+        self.lo = lo
+        self.hi = hi
+        self.unit = unit
+
+    @property
+    def kind(self):
+        return "number" if self.number else "enum"
 
 
 class Section:
@@ -124,6 +140,7 @@ class Plugin:
             "why": self.WHY,
             "channels": [{"key": c.key, "label": c.label, "target": c.target,
                           "values": c.values, "group": c.group, "role": c.role,
+                          "kind": c.kind, "lo": c.lo, "hi": c.hi, "unit": c.unit,
                           "why": c.why}
                          for c in self.channels()],
             "sections": [{"title": s.title, "rows": s.rows, "note": s.note}

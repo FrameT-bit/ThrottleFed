@@ -37,6 +37,49 @@
           "note": "cctk reaches the same attributes but needs root to run, and it can also change Secure Boot, TPM and boot order. ThrottleFed stays on the narrow channel instead."
         }
       ]
+    },
+    {
+      "id": "asus-armoury",
+      "name": "ASUS ROG tunables",
+      "vendor": "ASUS",
+      "tab": "Asus",
+      "summary": "Package power limits, GPU power and the firmware switches, from the ASUS firmware attributes.",
+      "detail": "ASUS keeps the package power limits, the Nvidia power and the panel state in BIOS attributes instead of registers: the same values Armoury Crate drives on Windows. This is the channel the mainline asus-armoury driver publishes, so it needs no vendor tool, no daemon and no root beyond the privileged helper. The limits are kept per power source (AC and battery separately), the kernel publishes no bounds for them, and on some models every limit write is refused until a custom fan curve is active.",
+      "upstream": "https://github.com/OpenGamingCollective/asusctl",
+      "license": "GPL-3.0 (this plugin is original code; the upstream app and the kernel driver are the references for which attributes matter)",
+      "requires": [
+        "/sys/class/firmware-attributes/asus-armoury/attributes"
+      ],
+      "vendor_match": [
+        "asus"
+      ],
+      "package": "packages/asus-armoury",
+      "credits": [
+        {
+          "name": "asusctl (asusd, rog-control-center)",
+          "creator": "Luke Jones and the asus-linux project, now the Open Gaming Collective",
+          "repo": "https://github.com/OpenGamingCollective/asusctl",
+          "license": "MPL-2.0",
+          "reuse": "which firmware knobs matter on a ROG machine and what each one is for: the power limits, the GPU power, the panel modes, the POST sound",
+          "note": "This plugin is not a wrapper around it and no code was copied. asusctl is a daemon with a D-Bus client; this plugin writes the attributes the kernel publishes, so none of it has to be installed."
+        },
+        {
+          "name": "asus-armoury (the Linux kernel driver)",
+          "creator": "Luke Jones, in the mainline kernel",
+          "repo": "https://github.com/torvalds/linux/blob/master/drivers/platform/x86/asus-armoury.c",
+          "license": "GPL-2.0-or-later",
+          "reuse": "the attribute names, what each one means, and the fact that the driver checks a value against the limits it carries before the firmware sees it",
+          "note": "Without this driver the attributes do not exist, and this plugin reports nothing rather than guessing. The LED and fan curve surfaces are not part of it."
+        },
+        {
+          "name": "ASUS Armoury Crate",
+          "creator": "ASUSTeK Computer Inc.",
+          "repo": "https://rog.asus.com/content/armoury-crate/",
+          "license": "proprietary, ASUS's own, Windows only",
+          "reuse": "only the knowledge that these knobs exist in the firmware and what they are called. The values are the firmware's, not the application's",
+          "note": "Nothing from it is used, packaged or required here, and it is not the reason the knobs work: the kernel driver is."
+        }
+      ]
     }
   ]
 }

@@ -930,10 +930,42 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
                 group = Adw.PreferencesGroup(title=esc(ch["group"]))
                 groups[ch["group"]] = group
                 box.append(group)
-            values = list(ch["values"])
             now = self._plugin_now(rep, ch)
-            known = now in values
             why = ch.get("why", "")
+            if ch.get("kind") == "number":
+                # A range is not a list. The machine either publishes the bounds or
+                # it does not, and either way the honest row is a number field: an
+                # empty field means the same thing an unset picker means, and the
+                # plan refuses what the firmware refuses instead of clamping it.
+                lo, hi = ch.get("lo"), ch.get("hi")
+                unit = f" {ch['unit']}" if ch.get("unit") else ""
+                if lo is not None and hi is not None:
+                    title = f"{ch['label']}  ({lo}..{hi}{unit})"
+                    why += f"  |  the firmware accepts {lo} to {hi}{unit}, and refuses the rest"
+                else:
+                    title = ch["label"]
+                    why += ("  |  this kernel publishes no range for this one; the driver "
+                            "checks the value and refuses what the model does not accept")
+                if now and not now.startswith("<"):
+                    why += f"  |  it holds {now}{unit} right now"
+                else:
+                    why += "  |  the current value is root-only, so it is not shown here"
+                why += ".  Leave the field empty to leave this one alone."
+                field = Gtk.Entry()
+                field.set_width_chars(8)
+                field.set_max_length(8)
+                field.set_input_purpose(Gtk.InputPurpose.DIGITS)
+                field.set_valign(Gtk.Align.CENTER)
+                if lo is not None and hi is not None:
+                    field.set_placeholder_text(f"{lo}-{hi}")
+                row = Adw.ActionRow(title=esc(title), subtitle=esc(why))
+                row.add_suffix(field)
+                row.set_activatable_widget(field)
+                group.add(row)
+                pickers[ch["key"]] = field
+                continue
+            values = list(ch["values"])
+            known = now in values
             if not known:
                 why += ("  |  the firmware value here could not be read by this process"
                         " (it is root-only), so nothing is preselected. Choose a value"
@@ -1024,11 +1056,30 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         pickers = self.plugin_pickers.get(rep["id"], {})
         plan = []
         for ch in rep["channels"]:
-            combo = pickers.get(ch["key"])
-            if combo is None:
+            picker = pickers.get(ch["key"])
+            if picker is None:
+                continue
+            if ch.get("kind") == "number":
+                text = picker.get_text().strip()
+                if not text:
+                    continue      # empty field: the user left this channel alone
+                lo, hi = ch.get("lo"), ch.get("hi")
+                unit = f" {ch['unit']}" if ch.get("unit") else ""
+                try:
+                    number = int(text)
+                except ValueError:
+                    raise ValueError(f"{ch['label']}: this one takes a whole number, "
+                                     f"not '{text}'")
+                if lo is not None and hi is not None and not lo <= number <= hi:
+                    raise ValueError(f"{ch['label']}: the firmware accepts {lo} to {hi}{unit} "
+                                     f"and refuses the rest, so {number} is not written")
+                value = str(number)
+                if value == self._plugin_now(rep, ch):
+                    continue      # the firmware already holds it; writing it back is noise
+                plan.append((ch["label"], ch["target"], value, "", value))
                 continue
             values = list(ch["values"])
-            idx = combo.get_selected()
+            idx = picker.get_selected()
             if idx < 1 or idx - 1 >= len(values):
                 continue      # entry zero: the user left this channel alone
             value = values[idx - 1]
@@ -1045,7 +1096,13 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         except Exception as exc:
             self.toast(f"This plugin failed to report: {exc}", 6)
             return
-        tsv = self.plugin_plan(rep)
+        try:
+            tsv = self.plugin_plan(rep)
+        except ValueError as exc:
+            # A plan the firmware would refuse is refused here, before the helper is
+            # asked for anything: nothing is written and nothing is clamped.
+            self.toast(str(exc), 6)
+            return
         if not tsv.strip():
             self.toast("Nothing to apply.")
             return
