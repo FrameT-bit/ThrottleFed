@@ -107,6 +107,7 @@ sudo python3 throttlefed.py restore                  # back to the captured stoc
 sudo python3 throttlefed.py auto                     # reassert the active profile
 sudo python3 throttlefed.py demo                     # self-test, always restores
 sudo python3 throttlefed.py experimental --force-bit 0 off
+python3 throttlefed.py update-check                  # is there a newer release?
 ```
 
 `--dry-run` works on every command that writes. `--if-drift` writes only what
@@ -191,6 +192,42 @@ Those are two different claims, and they are always reported separately.
 `demo` closes the loop end to end: apply, read back through sysfs and through the
 MSR, restore, 12 checks. It proves nothing broke on the way back. It is not proof of
 effect.
+
+## Updates
+
+```bash
+python3 throttlefed.py update-check            # is there a newer release?
+python3 throttlefed.py update-check --json     # the whole answer, for scripts
+```
+
+```text
+throttlefed 1.0.0
+  published      : 1.0.0  (branch)
+  updates        : none, this is the newest published version
+  one unauthenticated HTTPS GET to GitHub; nothing about this machine is sent
+```
+
+Exit codes: `0` this build is the newest, `1` a newer version is published, `2` the
+check could not run.
+
+What it does, exactly:
+
+- At most three requests, all to `api.github.com`, all unauthenticated and with no
+  query string: the newest release, then the newest tag, then `VERSION` on `main`.
+  The first one that answers with a version wins.
+- The answer is cached in `$XDG_CACHE_HOME/throttlefed/update.json` for 24 hours, so
+  a check that finds a fresh entry does not open a socket at all. A failure is cached
+  for 15 minutes only: one dropped connection should not be the answer for a day.
+- `--offline` reads the cache and never opens a socket. `--force` ignores a fresh one.
+- Nothing is downloaded and nothing is installed. The check reports, you decide.
+
+The GUI runs the same check once a day, in a background thread, and only when the
+cache is stale. A newer version reveals a banner whose button opens the releases
+page; a failure stays silent. The diagnostics view shows the local version and the
+result of the last check.
+
+For the maintainer: the channel is release, then tag, then the `VERSION` file on
+`main`. To publish 1.1.0, bump `VERSION` and push, or tag `v1.1.0`.
 
 ## Notes
 

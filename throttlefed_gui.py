@@ -394,6 +394,7 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
 
         self.refresh()
         self._start_tick()
+        self._start_update_check()
 
     # ---- UI helpers
     @staticmethod
@@ -427,6 +428,7 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Save stock now", "win.snapshot")
         menu.append("Open the CLI in a terminal", "win.cli")
+        menu.append("Check for updates", "win.updates")
         menu.append("About ThrottleFed", "win.about")
         button = Gtk.MenuButton()
         button.set_icon_name("open-menu-symbolic")
@@ -434,7 +436,7 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         button.add_css_class("flat")
 
         for name, cb in (("snapshot", self.on_snapshot), ("cli", self.on_cli),
-                         ("about", self.on_about)):
+                         ("updates", self.on_check_updates), ("about", self.on_about)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", lambda _a, _p, f=cb: f())
             self.add_action(action)
@@ -539,6 +541,17 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         self.alerta = Adw.Banner()
         self.alerta.set_revealed(False)
         box.append(self.alerta)
+
+        # second banner, for updates: quiet, hidden until a check finds something
+        # newer, and never in the way of the warning above.
+        self.update_banner = Adw.Banner()
+        self.update_banner.set_revealed(False)
+        try:
+            self.update_banner.set_button_label("Release notes")
+            self.update_banner.connect("button-clicked", lambda *_: self._open_releases())
+        except (AttributeError, TypeError):
+            pass  # older libadwaita: the banner stays informational
+        box.append(self.update_banner)
 
         g1 = Adw.PreferencesGroup(
             title="Package budget",
@@ -769,6 +782,7 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
             f"machine     : {read_text('/sys/class/dmi/id/product_name', '?')} "
             f"(BIOS {read_text('/sys/class/dmi/id/bios_version', '?')})",
             f"python      : {sys.version.split()[0]}  ·  helper C: {helper}",
+            f"version     : throttlefed {core.VERSION}  ·  update check: {self.update_note()}",
             "",
             "PACKAGE BUDGET (sysfs, unprivileged read)",
             f"  PL1 long_term   : {fmt_uw(pkg.get('pl1_uw'))}   (window {pkg.get('pl1_win_us', 0) / 1e6:.1f} s)",
@@ -960,7 +974,69 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
             "Python/GTK4 interface; every write goes through a C helper via pkexec, which "
             "returns the value re-read from sysfs. Profile regeneration: throttlefed.py."
         )
+        about.add_link("Releases and update check", core.RELEASES_PAGE)
         about.present(self)
+
+    # ---- updates
+    def update_note(self):
+        """The last known check result, from the cache only: this feeds the
+        diagnostics view, which is instant and never waits on the network."""
+        try:
+            res = core.update_check(offline=True)
+        except Exception as exc:
+            return f"unknown ({type(exc).__name__})"
+        if res.get("source") == "none":
+            return "nothing published upstream yet"
+        if res.get("latest") and res.get("has_update"):
+            return f"{res['latest']} is published, this build is {res['local']}"
+        if res.get("latest"):
+            return f"{res['latest']} is the newest published ({res['source']})"
+        return "no answer from GitHub yet"
+
+    def _start_update_check(self):
+        """One check a day, off the main loop, from the cache when it is fresh.
+        Failures stay silent: a launch must never nag or wait on the network."""
+        def runner():
+            try:
+                res = core.update_check()
+            except Exception:
+                return
+            GLib.idle_add(self._update_result, res, True)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def on_check_updates(self):
+        self.toast("Checking for updates...")
+
+        def runner():
+            try:
+                res = core.update_check(force=True)
+            except Exception as exc:
+                res = {"local": core.VERSION, "latest": None,
+                       "error": f"{type(exc).__name__}: {exc}"}
+            GLib.idle_add(self._update_result, res, False)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _update_result(self, res, quiet):
+        if res.get("has_update"):
+            self.update_banner.set_title(
+                f"Update available: {res['latest']} (this build is {res['local']}).")
+            self.update_banner.set_revealed(True)
+            if not quiet:
+                self.toast(f"Update available: {res['latest']}", 6)
+        elif res.get("error"):
+            if not quiet:
+                self.toast(f"Could not check for updates: {res['error']}", 8)
+        elif not quiet and res.get("latest"):
+            self.toast(f"No newer version, this build is {res['local']}")
+        return GLib.SOURCE_REMOVE
+
+    def _open_releases(self):
+        try:
+            Gtk.UriLauncher.new(core.RELEASES_PAGE).launch(self, None, None)
+        except Exception:
+            self.toast(core.RELEASES_PAGE, 8)
 
     # ---- periodic refresh
     def _start_tick(self):

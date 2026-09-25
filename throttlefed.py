@@ -35,19 +35,35 @@ No external dependencies. Python 3.9+.
 """
 
 import argparse
+import base64
 import glob
 import importlib.util
 import json
 import os
 import shutil
+import re
 import struct
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 VERSION = "1.0.0"
 IS_ROOT = os.geteuid() == 0
+
+# Update channel. The check is one unauthenticated HTTPS GET to GitHub: no query
+# string, no machine identifier, nothing about this machine leaves the box. The
+# answer is cached under $XDG_CACHE_HOME for a day, so a launch that finds a fresh
+# entry does not touch the network at all.
+GITHUB_REPO = "FrameT-bit/ThrottleFed"
+API = "https://api.github.com/repos/" + GITHUB_REPO
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases"
+UPDATE_CACHE = (Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+                / "throttlefed" / "update.json")
+UPDATE_TTL = 24 * 3600
+ERROR_TTL = 15 * 60
 
 # ----------------------------------------------------------------------------
 # caminhos
@@ -2377,6 +2393,137 @@ def cmd_plugins(args):
     return 0
 
 
+# ----------------------------------------------------------------------------
+# update check
+# ----------------------------------------------------------------------------
+
+def version_key(text):
+    """'v1.2.3-rc1' -> (1, 2, 3). Empty tuple when there is no number in it, so a
+    malformed tag can never come out as newer than this build."""
+    core = str(text or "").strip().lstrip("vV").split("-")[0].split("+")[0]
+    return tuple(int(n) for n in re.findall(r"\d+", core))
+
+
+def fetch_published():
+    """(version, source, detail) for what is published upstream.
+
+    Two channels, in order: the newest release tag, then the VERSION file on the
+    main branch. The file is there so the check means something before the first
+    release is tagged; the first channel that answers with a version wins.
+    """
+    for url, source in ((f"{API}/releases/latest", "release"),
+                        (f"{API}/tags", "tag"),
+                        (f"{API}/contents/VERSION?ref=main", "branch")):
+        req = urllib.request.Request(url, headers={
+            "User-Agent": f"throttlefed/{VERSION}",
+            "Accept": "application/vnd.github+json"})
+        raw, dropped = None, None
+        for attempt in (1, 2):
+            # A home link drops the odd connection: one quiet retry before giving
+            # up, so a single lost packet does not read as "could not check".
+            try:
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    raw = ""
+                    break
+                if exc.code in (403, 429):
+                    return None, "error", f"GitHub rate limit or block (HTTP {exc.code})"
+                return None, "error", f"HTTP {exc.code} from {url}"
+            except Exception as exc:
+                dropped = exc
+                if attempt == 1:
+                    time.sleep(1)
+        if raw is None:
+            return None, "error", f"{type(dropped).__name__}: {dropped} ({url})"
+        if raw == "":
+            continue  # nothing published on this channel yet
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            continue
+        if source == "release":
+            tag = (data or {}).get("tag_name") or ""
+        elif source == "tag":
+            tag = ((data or [{}])[0] or {}).get("name") or ""
+        else:
+            try:
+                tag = base64.b64decode((data or {}).get("content") or "").decode("utf-8", "replace")
+            except Exception:
+                tag = ""
+        tag = (tag or "").strip().splitlines()[0].strip() if (tag or "").strip() else ""
+        if tag:
+            return tag.lstrip("vV"), source, f"{tag} ({source} upstream)"
+    return None, "none", "nothing published yet"
+
+
+def update_check(force=False, offline=False):
+    """This build against what is published, as a plain dict.
+
+    The answer is cached for UPDATE_TTL, so a launch that finds a fresh entry
+    never opens a socket. offline does not open one either: it reports the cache,
+    including 'never checked'.
+    """
+    now = time.time()
+    try:
+        cached = json.loads(UPDATE_CACHE.read_text())
+    except (OSError, ValueError):
+        cached = {}
+    age = now - float(cached.get("checked_at") or 0)
+    # A failure expires in minutes, a success in a day: one dropped connection
+    # must not be reported as the answer for the rest of the day.
+    ttl = ERROR_TTL if cached.get("error") else UPDATE_TTL
+    if offline or (not force and cached.get("checked_at") and age < ttl):
+        out = dict(cached) if cached else {"checked_at": 0, "error": "never checked"}
+        out["from_cache"] = bool(cached)
+    else:
+        latest, source, detail = fetch_published()
+        out = {"checked_at": now, "latest": latest, "source": source, "detail": detail}
+        if latest is None and source == "error":
+            out["error"] = detail
+        try:
+            UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            UPDATE_CACHE.write_text(json.dumps(out, indent=2) + "\n")
+        except OSError:
+            pass
+        out["from_cache"] = False
+    out["local"] = VERSION
+    mine, theirs = version_key(VERSION), version_key(out.get("latest") or "")
+    out["has_update"] = bool(theirs and mine and theirs > mine)
+    out["age_s"] = int(max(0, now - float(out.get("checked_at") or 0)))
+    return out
+
+
+def cmd_update_check(args):
+    """0 = newest, 1 = a newer version is published, 2 = could not check."""
+    res = update_check(force=args.force, offline=args.offline)
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(bold(f"throttlefed {res['local']}"))
+        if res.get("latest"):
+            print(f"  published      : {res['latest']}  {dim('(' + res['source'] + ')')}")
+        elif res.get("error"):
+            print(f"  published      : {yellow('could not check')}  {dim(res['error'])}")
+        else:
+            print(f"  published      : {dim('nothing yet (no release, tag or VERSION upstream)')}")
+        if res.get("has_update"):
+            print(f"  updates        : {green('yes')} - {res.get('detail') or RELEASES_PAGE}")
+            print(f"  how            : git pull, or take the release at {RELEASES_PAGE}")
+        elif res.get("latest"):
+            print("  updates        : none, this is the newest published version")
+        if res.get("from_cache") and res.get("checked_at"):
+            print(f"  last check     : {dim(str(res['age_s'] // 3600) + ' h ago (cached, --force to re-check)')}")
+        print(dim("  one unauthenticated HTTPS GET to GitHub; nothing about this machine is sent"))
+    if res.get("has_update"):
+        return 1
+    if res.get("error") and not res.get("latest"):
+        return 2
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="throttlefed",
@@ -2391,6 +2538,7 @@ def main():
   sudo throttlefed.py watch                 live monitor
   sudo throttlefed.py restore               back to stock
   sudo throttlefed.py install               persist (systemd + 60s timer)
+  throttlefed.py update-check               is there a newer release?
 """)
     ap.add_argument("--version", action="version", version=f"throttlefed {VERSION}")
     ap.add_argument("--no-plugins", action="store_true",
@@ -2448,6 +2596,14 @@ def main():
     pl = sub.add_parser("plugins", help="vendor plugins (what is theirs, not the platform's)")
     pl.add_argument("--json", action="store_true")
     pl.set_defaults(func=cmd_plugins)
+
+    up = sub.add_parser("update-check",
+                        help="is there a newer release? (one HTTPS GET, cached for a day)")
+    up.add_argument("--force", action="store_true", help="ignore today's cached answer")
+    up.add_argument("--offline", action="store_true",
+                    help="read the cache only, never touch the network")
+    up.add_argument("--json", action="store_true", help="machine-readable output")
+    up.set_defaults(func=cmd_update_check)
 
     args = ap.parse_args()
     global PLUGINS_DISABLED
