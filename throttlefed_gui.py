@@ -354,6 +354,23 @@ def fit_size(w, h):
     return w, h
 
 
+# The entry at the top of a plugin picker that means "leave this channel alone".
+# It has to be a real entry, because Adw.ComboRow has no empty state: it falls back
+# to the first item, so without this a row would show a value nobody ever read and
+# Apply would write it back to the firmware.
+UNSET = ""
+
+
+def esc(text):
+    """Text that came from a plugin, from the store catalog or from the firmware.
+
+    A row title and subtitle are parsed as Pango markup, so a plugin that prints
+    "<root-only>" loses the whole line to a parse error and the user sees an empty
+    row. Everything that is not written in this file goes through here first.
+    """
+    return GLib.markup_escape_text(str(text))
+
+
 class ThrottleFedWindow(Adw.ApplicationWindow):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -402,6 +419,16 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
             self._clamp(self._page_tuning()), "ajuste", "Fine tuning", "preferences-system-symbolic")
         self.stack.add_titled_with_icon(
             self._clamp(self._page_monitor()), "monitor", "Monitor", "utilities-system-monitor-symbolic")
+
+        # The store is the last tab, and an installed plugin gets a tab in front of
+        # it: what a plugin drives is the plugin's own page, not a corner of somebody
+        # else's. Nothing plugin-shaped is imported until it is installed, so the
+        # store being empty is the same app as before there was a store.
+        self.plugin_pages = {}
+        self.plugin_pickers = {}
+        self.store_items = []
+        self.store_page = self._clamp(self._page_store())
+        self._sync_plugin_tabs()
         self.stack.connect("notify::visible-child-name", lambda *_: self.refresh())
 
         self.refresh()
@@ -723,8 +750,325 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         box.append(self._diag_block())
         return box
 
-    # ---- diagnostics (collapsed inside the monitor page)
+    # ---- store and plugin pages
+    def _page_store(self):
+        """What is on offer, and the only two things the store can be asked to do.
+
+        Reading the catalog is a file read: this page costs nothing, needs no
+        privilege, and works with no plugin installed at all. Installing is a
+        directory copy into a plugin search path, not a system package, and the
+        thing that touches firmware is still only the helper.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        self.store_group = Adw.PreferencesGroup(
+            title="Plugins on offer",
+            description="Nothing here comes installed, and nothing here is imported "
+                        "until it is installed: a plugin that is only on offer cannot "
+                        "be the reason the app fails to start.")
+        box.append(self.store_group)
+        self.store_hint = self._label("", "dim-label", wrap=True)
+        box.append(self.store_hint)
+        self._fill_store()
+        return box
+
+    def _fill_store(self):
+        for child in self.store_items:
+            self.store_group.remove(child)
+        self.store_items = []
+        self.store_rows = {}
+        store = getattr(core, "STORE", None)
+        if store is None:
+            self.store_hint.set_text(
+                "throttlefed_store.py is not next to throttlefed.py, so there is no "
+                "catalog to read and no install to do.")
+            return
+        try:
+            rows = store.status()
+        except Exception as exc:
+            self.store_hint.set_text(f"The catalog could not be read: {exc}")
+            return
+        target = store.target_dir()
+        self.store_hint.set_text(
+            f"An installed plugin is copied into {target}." if target
+            else "No writable plugin directory was found on this machine.")
+        for row in rows:
+            self.store_rows[row["id"]] = row
+            # Clicking the row expands it. What is inside is the reason to expand:
+            # what the plugin changes, and who made the original tool it stands on.
+            item = Adw.ExpanderRow(title=esc(row["name"]),
+                                   subtitle=esc(self._store_subtitle(row)))
+            try:
+                item.set_subtitle_lines(4)
+            except (AttributeError, TypeError):
+                pass  # older libadwaita: the subtitle is clipped instead
+            button = Gtk.Button(label="Remove" if row["installed"] else "Install")
+            button.add_css_class("flat" if row["installed"] else "suggested-action")
+            button.set_valign(Gtk.Align.CENTER)
+            button.set_sensitive(bool(row["packaged"]))
+            button.connect("clicked", lambda _b, pid=row["id"]: self.on_plugin_toggle(pid))
+            item.add_suffix(button)
+            if row["detail"]:
+                item.add_row(self._row("What it changes", row["detail"], lines=4))
+            for credit in row["credits"]:
+                self._credit_rows(item, credit)
+            self.store_group.add(item)
+            self.store_items.append(item)
+
+    @staticmethod
+    def _row(title, subtitle, lines=2):
+        """A read-only row. The cap on subtitle lines is tried, not required: an
+        older libadwaita clips the text instead of honouring it."""
+        row = Adw.ActionRow(title=esc(title), subtitle=esc(subtitle))
+        try:
+            row.set_subtitle_lines(lines)
+        except (AttributeError, TypeError):
+            pass
+        return row
+
+    def _credit_rows(self, container, credit):
+        """One credit, as rows: who made the tool, under what licence, what this
+        plugin reuses from it, and what it deliberately leaves alone.
+
+        The repository is a link, because the point of a credit is that a person can
+        go and look at the thing being credited.
+        """
+        container.add_row(self._row(
+            credit.get("name", "original tool"),
+            f"{credit.get('creator', 'unknown')}  ·  "
+            f"{credit.get('license', 'licence not stated')}"))
+        for label, value in (("What this plugin reuses", credit.get("reuse", "")),
+                             ("What it does not do", credit.get("note", ""))):
+            if value:
+                container.add_row(self._row(label, value, lines=4))
+        repo = credit.get("repo", "")
+        if repo:
+            row = self._row("Repository", repo)
+            link = Gtk.LinkButton(uri=repo, label="Open")
+            link.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(link)
+            row.set_activatable_widget(link)
+            container.add_row(row)
+
+    def _credits_group(self, credits, title="Credits and sources"):
+        """One expander per original tool, closed by default: the credit is on the
+        page where it belongs without taking the page over."""
+        if not credits:
+            return None
+        group = Adw.PreferencesGroup(
+            title=esc(title),
+            description=esc("The work this plugin stands on. None of it is bundled here "
+                            "and none of its code is inside the plugin."))
+        for credit in credits:
+            exp = Adw.ExpanderRow(title=esc(credit.get("name", "original tool")),
+                                  subtitle=esc(credit.get("creator", "")))
+            self._credit_rows(exp, credit)
+            group.add(exp)
+        return group
+
+    @staticmethod
+    def _store_subtitle(row):
+        """What a person needs to decide, in the order they need it: what it is for,
+        whether their machine has the channel at all, and what the code is."""
+        state = ("installed, its tab is open" if row["installed"]
+                 else "on offer" if row["packaged"] else "no package in the store")
+        hardware = (f"this machine has the channel: {row['hardware_note']}" if row["hardware"]
+                    else f"not for this machine: {row['hardware_note']}")
+        line = f"{row['summary']}\n{state}  ·  {hardware}"
+        if row["license"]:
+            line += f"\n{row['license']}"
+        return line
+
+    def _sync_plugin_tabs(self):
+        """Give every installed plugin a tab of its own, and keep the store last.
+
+        A view stack only appends, so the order is rebuilt on every change: plugin
+        tabs first, the store after them.
+        """
+        for page in self.plugin_pages.values():
+            self.stack.remove(page)
+        self.plugin_pages = {}
+        self.plugin_pickers = {}
+        # The store page is not in the stack on the first call, while the tabs are
+        # still being built, and removing a child that is not there is a GTK
+        # critical, not a no-op.
+        if self.store_page.get_parent() is self.stack:
+            self.stack.remove(self.store_page)
+        for plug in core.plugins(reload=True):
+            try:
+                rep = plug.report()
+                page = self._clamp(self._page_plugin(plug, rep))
+            except Exception as exc:
+                # A plugin that cannot describe itself, or whose page cannot be
+                # built, gets no tab: it must never be the reason the window itself
+                # fails to open. Same contract as the loader, one level up.
+                print(f"throttlefed: plugin tab skipped ({type(exc).__name__}: {exc})",
+                      file=sys.stderr)
+                continue
+            self.stack.add_titled_with_icon(page, f"plugin-{rep['id']}", rep["tab"],
+                                            "application-x-addon-symbolic")
+            self.plugin_pages[rep["id"]] = page
+        self.stack.add_titled_with_icon(self.store_page, "store", "Plugin Store",
+                                        "system-software-install-symbolic")
+
+    def _page_plugin(self, plug, rep):
+        """A plugin's page: its channels as pickers, one Apply, and what it reports.
+
+        The pickers are built from the plugin's own description of itself, so a
+        plugin added later needs no change here, and a plugin that reports nothing
+        shows that instead of an empty page pretending to be broken.
+        """
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        box.append(self._label(rep["name"], "title-3"))
+        if rep["why"]:
+            box.append(self._label(rep["why"], "dim-label", wrap=True))
+
+        pickers = {}
+        groups = {}
+        for ch in rep["channels"]:
+            group = groups.get(ch["group"])
+            if group is None:
+                group = Adw.PreferencesGroup(title=esc(ch["group"]))
+                groups[ch["group"]] = group
+                box.append(group)
+            values = list(ch["values"])
+            now = self._plugin_now(rep, ch)
+            known = now in values
+            why = ch.get("why", "")
+            if not known:
+                why += ("  |  the firmware value here could not be read by this process"
+                        " (it is root-only), so nothing is preselected. Choose a value"
+                        " to apply it.")
+            combo = Adw.ComboRow(title=esc(ch["label"]), subtitle=esc(why))
+            combo.set_model(Gtk.StringList.new([UNSET, *values]))
+            combo.set_selected(values.index(now) + 1 if known else 0)
+            group.add(combo)
+            pickers[ch["key"]] = combo
+        if groups:
+            first = next(iter(groups.values()))
+            apply_btn = Gtk.Button(label="Apply")
+            apply_btn.add_css_class("suggested-action")
+            apply_btn.connect("clicked", lambda _b, p=plug: self.on_apply_plugin(p))
+            first.set_header_suffix(apply_btn)
+        self.plugin_pickers[rep["id"]] = pickers
+
+        for sec in rep["sections"]:
+            if not sec["rows"]:
+                continue
+            group = Adw.PreferencesGroup(title=esc(sec["title"]))
+            if sec.get("note"):
+                group.set_description(esc(sec["note"]))
+            for row in sec["rows"]:
+                name = row[0] if isinstance(row, (tuple, list)) else row
+                text = row[1] if isinstance(row, (tuple, list)) and len(row) > 1 else ""
+                item = Adw.ActionRow(title=esc(name), subtitle=esc(text))
+                try:
+                    item.set_subtitle_lines(2)
+                except (AttributeError, TypeError):
+                    pass
+                group.add(item)
+            box.append(group)
+        if not rep["channels"] and not rep["sections"]:
+            box.append(self._label("This plugin reports nothing to change here.",
+                                   "dim-label", wrap=True))
+        credits = self._credits_group(rep.get("credits") or [])
+        if credits is not None:
+            box.append(credits)
+        return box
+
+    @staticmethod
+    def _plugin_now(rep, ch):
+        """The firmware value right now, borrowed from the plugin's own report.
+
+        It is the first token of the read-only row named after the attribute the
+        channel targets. When the value is root-only and this process cannot read
+        it, the row says so and nothing is preselected, which is the honest thing
+        to show: the picker starts where the firmware is only if the firmware
+        answered.
+        """
+        name = str(ch["target"]).rsplit(":", 1)[-1]
+        for sec in rep["sections"]:
+            for row in sec["rows"]:
+                if (isinstance(row, (tuple, list)) and len(row) > 1
+                        and str(row[0]) == name):
+                    first = str(row[1]).split()
+                    return first[0].strip("()") if first else ""
+        return ""
+
+    def on_plugin_toggle(self, pid):
+        """Install or remove, in a thread: it is a file copy, and the UI stays live."""
+        store = getattr(core, "STORE", None)
+        if store is None:
+            return
+        row = self.store_rows.get(pid) or {}
+        remove = bool(row.get("installed"))
+
+        def work():
+            ok, message = (store.remove if remove else store.install)(pid)
+            return ok, {"message": message}
+
+        def done(result):
+            ok, payload = result
+            if not ok:
+                self.toast(payload.get("message") or "the store refused", 6)
+                return
+            self.toast(payload.get("message", ""), 5)
+            self._sync_plugin_tabs()
+            self._fill_store()
+
+        self._busy_do(work, done)
+
+    def plugin_plan(self, rep):
+        """The plan a plugin page would send: one line per channel, in the plugin's
+        own words. Kept apart from the click handler so the plan can be checked
+        without a root prompt in the way."""
+        pickers = self.plugin_pickers.get(rep["id"], {})
+        plan = []
+        for ch in rep["channels"]:
+            combo = pickers.get(ch["key"])
+            if combo is None:
+                continue
+            values = list(ch["values"])
+            idx = combo.get_selected()
+            if idx < 1 or idx - 1 >= len(values):
+                continue      # entry zero: the user left this channel alone
+            value = values[idx - 1]
+            if value == self._plugin_now(rep, ch):
+                continue      # the firmware already holds it; writing it back is noise
+            plan.append((ch["label"], ch["target"], value, "", value))
+        return plan_to_lines(plan)
+
+    def on_apply_plugin(self, plug):
+        """Write the chosen channel values through the same helper path as everything
+        else: check first, apply after, and believe the readback."""
+        try:
+            rep = plug.report()
+        except Exception as exc:
+            self.toast(f"This plugin failed to report: {exc}", 6)
+            return
+        tsv = self.plugin_plan(rep)
+        if not tsv.strip():
+            self.toast("Nothing to apply.")
+            return
+
+        def work():
+            run_helper(["capture"])
+            ok, res = run_helper(["check"], tsv)
+            if not ok:
+                return False, {"apply": res}
+            ok, res = run_helper(["apply", "--profile", "custom"], tsv)
+            return ok and not res.get("bad"), {"apply": res}
+
+        def done(result):
+            ok, payload = result
+            if not ok:
+                self.toast(f"Failed: {(payload.get('apply') or {}).get('erro') or 'see diagnostics'}", 6)
+                return
+            self.toast(self._summary_toast(f"{rep['tab']} applied", payload), 6)
+
+        self._busy_do(work, done)
+
     def _diag_block(self):
+        """Diagnostics, collapsed inside the monitor page."""
         exp = Gtk.Expander(label="Diagnostics")
         exp.set_expanded(False)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)

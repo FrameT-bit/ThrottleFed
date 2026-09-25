@@ -69,11 +69,11 @@ UPDATE_TTL = 24 * 3600
 ERROR_TTL = 15 * 60
 
 # ----------------------------------------------------------------------------
-# caminhos
+# paths
 # ----------------------------------------------------------------------------
 # Only literal paths belong here. Anything whose *name* is an enumeration result
 # of the kernel or the firmware (RAPL zone number, DPTF PCI address, thermal zone
-# index, DRM card number) is discovered by content in the "deteccao de hardware"
+# index, DRM card number) is discovered by content in the "hardware detection"
 # section below: an index is not a contract, and reading or writing by index is
 # silently wrong on a machine that enumerates in another order.
 RAPL = Path("/sys/class/powercap")
@@ -100,7 +100,33 @@ TIMER_NAME = "throttlefed.timer"
 # with 203/EXEC on any other machine, and after the checkout is moved.
 WRAPPER = Path("/usr/local/bin/throttlefed")
 SELF = Path(__file__).resolve()
-PLUGIN_DIRS = (SELF.parent / "plugins", Path("/usr/local/share/throttlefed/plugins"))
+
+
+def _load_store():
+    """The store module by path, the same way plugins are loaded.
+
+    By path and not by name: this file is imported by the GUI and by the tests
+    under names of their own, and a plain `import` would then depend on sys.path
+    happening to contain this directory.
+    """
+    path = SELF.parent / "throttlefed_store.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("throttlefed_store", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+STORE = _load_store()
+# The store owns the list of plugin directories, because it is also the list of
+# places an install can go: first writable path wins. Without the store module the
+# tool still runs, with the in-tree plugins and nothing to install.
+PLUGIN_DIRS = (STORE.search_dirs() if STORE
+               else (SELF.parent / "plugins", Path("/usr/local/share/throttlefed/plugins")))
 PLUGINS_DISABLED = False
 
 # ----------------------------------------------------------------------------
@@ -2373,6 +2399,61 @@ def cmd_status(args):
     return 0
 
 
+def cmd_store(args):
+    """What is on offer, and the two writes the store does: put in, take out.
+
+    None of this needs root. A plugin is a directory copied into a plugin search
+    path, not a system package, and the thing that touches firmware is the helper
+    the plugin's channels go through, exactly as for the core.
+    """
+    if STORE is None:
+        print(red("throttlefed_store.py is missing next to throttlefed.py"))
+        return 2
+    action = args.action or "list"
+    if action in ("install", "remove") and not args.id:
+        print(red(f"store {action}: which plugin? `throttlefed store` lists them"))
+        return 2
+    if action in ("install", "remove"):
+        ok, message = (STORE.install if action == "install" else STORE.remove)(args.id)
+        print((bold if ok else red)(f"  {message}"))
+        if ok and action == "install":
+            print(dim("  picked up by the next `throttlefed plugins`, and by the app"))
+        return 0 if ok else 2
+    try:
+        rows = STORE.status()
+    except STORE.StoreError as exc:
+        print(red(f"  {exc}"))
+        return 2
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    print(bold("throttlefed store"))
+    print(f"  catalog      : {STORE.CATALOG}")
+    print(f"  installs into: {STORE.target_dir() or 'nowhere writable'}")
+    for row in rows:
+        state = ("installed" if row["installed"]
+                 else "on offer" if row["packaged"] else "no package in the store")
+        print(f"\n  {row['id']}  ({row['name']})")
+        print(f"    {row['summary']}")
+        print(f"    tab      : {row['tab']}")
+        print(f"    state    : {state}")
+        if row["installed"]:
+            print(f"    path     : {row['path']}")
+        print("    hardware : " + ("yes, " + row["hardware_note"] if row["hardware"]
+                                   else "no - " + row["hardware_note"]))
+        if row["upstream"]:
+            print(f"    upstream : {row['upstream']}")
+        if row["license"]:
+            print(f"    license  : {row['license']}")
+        # The credit belongs in the terminal output too, not only in --json and in the
+        # GUI: whoever is reading the list should see whose work this stands on.
+        for credit in row["credits"]:
+            print(f"    credited : {credit.get('creator', '?')}, {credit.get('name', '?')}")
+    if not rows:
+        print(dim("  the catalog has no entries."))
+    return 0
+
+
 def cmd_plugins(args):
     plug = plugins()
     if args.json:
@@ -2649,6 +2730,11 @@ def main():
 
     pl = sub.add_parser("plugins", help="vendor plugins (what is theirs, not the platform's)")
     pl.add_argument("--json", action="store_true")
+    stp = sub.add_parser("store", help="plugins on offer: list, install, remove")
+    stp.add_argument("action", nargs="?", choices=["list", "install", "remove"], default="list")
+    stp.add_argument("id", nargs="?", help="plugin id, for install and remove")
+    stp.add_argument("--json", action="store_true", help="machine-readable output")
+    stp.set_defaults(func=cmd_store)
     pl.set_defaults(func=cmd_plugins)
 
     up = sub.add_parser("update-check",

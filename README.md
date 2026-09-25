@@ -108,6 +108,7 @@ sudo python3 throttlefed.py auto                     # reassert the active profi
 sudo python3 throttlefed.py demo                     # self-test, always restores
 sudo python3 throttlefed.py experimental --force-bit 0 off
 python3 throttlefed.py update-check                  # is there a newer release?
+python3 throttlefed.py store list                    # plugins on offer
 ```
 
 `--dry-run` works on every command that writes. `--if-drift` writes only what
@@ -126,6 +127,34 @@ never runs as root. Only the C helper is elevated, through pkexec, and the polki
 policy authorizes exactly one path: `/usr/local/libexec/throttlefed-helper`. That
 helper validates each target against a closed whitelist, writes it, and reads it
 back before reporting.
+
+## Plugins
+
+The core drives what the platform gives every machine: RAPL, HWP, i915 RPS, the
+generic `platform_profile`. Anything that belongs to a single vendor is a plugin,
+and plugins are not installed by default. `plugins/` holds the contract, the store
+holds the packages.
+
+```bash
+python3 throttlefed.py store list                    # what is on offer
+python3 throttlefed.py store install dell-pm-va
+python3 throttlefed.py store remove dell-pm-va
+```
+
+`store` needs no root: the package goes to the first writable plugin directory,
+which is `plugins/` in a checkout. A system install falls through to the user's data
+directory, then to `/usr/local/share/throttlefed/plugins`. The store never imports
+the package it just wrote, and an installed plugin gets its own tab in the GUI,
+after the built-in pages and before the store itself.
+
+Every entry credits the tool the plugin stands on: the original author, the
+repository, the license, and what was reused. A plugin here is a compatibility layer
+written against this tool's own helper, not a wrapper around the original. No code
+is copied.
+
+On offer today: `dell-pm-va`, for the BIOS attributes Dell publishes through
+`dell-wmi-sysman`. The store is experimental: it works and it is exercised against
+the firmware on a real machine, but its wording and its layout can still change.
 
 ## Development status
 

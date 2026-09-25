@@ -1,0 +1,42 @@
+{
+  "format": 1,
+  "updated": "2026-09-25",
+  "note": "The index the store reads. 'package' is relative to this directory, and 'requires' is what has to exist on the machine for the plugin to have anything to drive. Adding an entry for a plugin hosted elsewhere is a matter of pointing 'package' at a package that ships with it, or extending this format with a download instead of a directory.",
+  "plugins": [
+    {
+      "id": "dell-pm-va",
+      "name": "Dell Power Manager",
+      "vendor": "Dell",
+      "tab": "Dell PM",
+      "summary": "Thermal mode and battery charging from the Dell firmware attributes.",
+      "detail": "Dell keeps part of the thermal and power policy in BIOS attributes instead of registers. This is the same channel Dell Power Manager writes through, reached directly instead of through Dell Command | Configure (cctk), which needs root and can also change Secure Boot, TPM and boot order. Firmware state, survives a reboot, and on some models a write only applies on the next boot.",
+      "upstream": "https://github.com/alexVinarskis/dell-powermanager",
+      "license": "GPL-3.0 (this plugin is original code; the upstream app is the reference for which attributes matter)",
+      "requires": [
+        "/sys/class/firmware-attributes/dell-wmi-sysman/attributes"
+      ],
+      "vendor_match": [
+        "dell"
+      ],
+      "package": "packages/dell-pm-va",
+      "credits": [
+        {
+          "name": "Dell Power Manager (cross-platform re-implementation)",
+          "creator": "alexVinarskis (GitHub)",
+          "repo": "https://github.com/alexVinarskis/dell-powermanager",
+          "license": "GPL-3.0",
+          "reuse": "which firmware attributes carry the thermal policy and the battery charge policy, and what each value means on the machine",
+          "note": "This plugin is not a wrapper around it and no code was copied. It is written against the sysfs channel ThrottleFed already writes to, so it needs no new privilege and no root."
+        },
+        {
+          "name": "Dell Command | Configure (formerly CCTK)",
+          "creator": "Dell Inc.",
+          "repo": "https://www.dell.com/support/kbdoc/en-us/000178000/dell-command-configure",
+          "license": "proprietary, Dell's own",
+          "reuse": "only the knowledge of which attributes exist and which values the firmware accepts",
+          "note": "cctk reaches the same attributes but needs root to run, and it can also change Secure Boot, TPM and boot order. ThrottleFed stays on the narrow channel instead."
+        }
+      ]
+    }
+  ]
+}

@@ -10,12 +10,15 @@
 # --------------- Something Something --------------------
 # Good forking!
 """
-plugins/dell.py - the Dell channel: BIOS attributes published through dell-wmi-sysman.
+Dell Power Manager compatibility: BIOS attributes published through dell-wmi-sysman.
 
 Dell exposes part of the power and thermal policy as firmware attributes, not as
-registers. On Windows that is the channel Dell Power Manager drives, and it is a
-different channel from RAPL: the value is firmware state, it survives a reboot, and
-it can take effect before the kernel starts.
+registers. On Windows that is the channel Dell Power Manager drives, and on Linux the
+cross-platform re-implementation (github.com/alexVinarskis/dell-powermanager) drives
+the same values through Dell Command | Configure, `cctk`, which is a root tool that
+can also change Secure Boot, TPM and boot order. This plugin reaches the same
+attributes through the firmware-attributes sysfs class instead: same firmware state,
+same values, one less privileged binary in the path.
 
 Two consequences worth knowing before writing anything here:
 
@@ -93,6 +96,31 @@ DEVICE_PATHS = {
     "AdvancedMode": "BIOS advanced mode, read only from here",
 }
 
+# Where Dell Power Manager shows a control, and where the same control lives here.
+# This is the compatibility table: it is the list of things a person migrating from
+# that app expects to find, and it is deliberately short.
+DPM_EQUIVALENT = (
+    ("Thermal Management (Optimized/Cool/Quiet/UltraPerformance)",
+     "channel fwa:ThermalManagement, and --thermal for the profile side"),
+    ("Battery Charge Configuration (Adaptive/Standard/Express/Primarily AC/Custom)",
+     "channel fwa:PrimaryBattChargeCfg"),
+    ("Custom charge window (start/stop, percent)",
+     "channels fwa:CustomChargeStart and fwa:CustomChargeStop"),
+    ("Peak Shift on battery",
+     "channels fwa:PeakShiftCfg and fwa:PeakShiftBatteryThreshold"),
+    ("BIOS values shown for information (turbo, HWP, C-states, core count)",
+     "reported in this section, never written from here: the tool drives those at runtime"),
+)
+
+DPM_NOT_HERE = (
+    ("Secure Boot, TPM, virtualization, asset and password attributes",
+     "they sit in the same directory and cctk can change them; this plugin does not touch them"),
+    ("Anything that needs cctk itself",
+     "the firmware attributes carry the values, so no root binary is needed for these knobs"),
+    ("Dell's Windows-only features (ExpressCharge on AC, battery health reporting)",
+     "not published through firmware attributes on this class of machine"),
+)
+
 ###############################################
 # ENGINE
 ###############################################
@@ -127,12 +155,39 @@ def _kind(name):
         return ""
 
 
-class DellPlugin(Plugin):
-    ID = "dell"
+class DellPowerManagerPlugin(Plugin):
+    ID = "dell-pm-va"
     NAME = "Dell firmware attributes (dell-wmi-sysman)"
+    TAB = "Dell PM"
     VENDOR = "Dell"
     WHY = ("Dell keeps part of the thermal and power policy in BIOS attributes, the same "
            "channel Dell Power Manager uses on Windows. It is firmware state, not a register.")
+    # Who made the thing this plugin is a compatibility layer for. Shown on the
+    # store row and on this plugin's own tab, one expander each.
+    CREDITS = (
+        {
+            "name": "Dell Power Manager (cross-platform re-implementation)",
+            "creator": "alexVinarskis (GitHub)",
+            "repo": "https://github.com/alexVinarskis/dell-powermanager",
+            "license": "GPL-3.0",
+            "reuse": ("which firmware attributes carry the thermal policy and the battery "
+                      "charge policy, and what each value means on the machine"),
+            "note": ("This plugin is not a wrapper around it and no code was copied. It is "
+                     "written against the sysfs channel ThrottleFed already writes to, so it "
+                     "needs no new privilege and no root."),
+        },
+        {
+            "name": "Dell Command | Configure (formerly CCTK)",
+            "creator": "Dell Inc.",
+            "repo": "https://www.dell.com/support/kbdoc/en-us/000178000/dell-command-configure",
+            "license": "proprietary, Dell's own",
+            "reuse": ("only the knowledge of which attributes exist and which values the "
+                      "firmware accepts"),
+            "note": ("cctk reaches the same attributes but needs root to run, and it can also "
+                     "change Secure Boot, TPM and boot order. ThrottleFed stays on the narrow "
+                     "channel instead."),
+        },
+    )
 
     def detect(self):
         if not ATTRS.is_dir():
@@ -151,14 +206,23 @@ class DellPlugin(Plugin):
             value = _current(name)
             possible = "/".join(_possible(name)) or "-"
             rows.append((name, f"{value}    [{possible}]  {DEVICE_PATHS.get(name, '')}"))
-        if not rows:
-            return []
-        note = ("current_value is root-only. This kernel publishes no is_readonly, so whether an "
-                "attribute accepts a write is only proved by writing it and reading it back.")
-        pending = ATTRS.parent / "pending_reboot"
-        if pending.exists():
-            note += " An attribute write can set pending_reboot: the value is stored by the firmware and applies on the next boot."
-        return [Section(f"{self.NAME}", rows, note)]
+        out = []
+        if rows:
+            note = ("current_value is root-only. This kernel publishes no is_readonly, so whether an "
+                    "attribute accepts a write is only proved by writing it and reading it back.")
+            pending = ATTRS.parent / "pending_reboot"
+            if pending.exists():
+                note += " An attribute write can set pending_reboot: the value is stored by the firmware and applies on the next boot."
+            out.append(Section(f"{self.NAME}", rows, note))
+        compat = list(DPM_EQUIVALENT) + list(DPM_NOT_HERE)
+        out.append(Section(
+            "Compatibility: Dell Power Manager",
+            compat,
+            "Dell Power Manager (the cross-platform re-implementation) writes these values with "
+            "cctk, which needs root. The values below are the same firmware attributes, reached "
+            "through /sys/class/firmware-attributes without it.",
+        ))
+        return out
 
     def channels(self):
         out = []

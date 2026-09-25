@@ -75,6 +75,9 @@ MSR_MODULE = Path("/sys/module/msr")
 CHECKOUT_FILES = (
     "throttlefed.py",
     "throttlefed_gui.py",
+    "throttlefed_store.py",
+    "plugins/base.py",
+    "plugins/store/catalog.json",
     "installer-backend.sh",
     "src/throttlefed-helper.c",
     "data/io.github.framet.throttlefed.policy",

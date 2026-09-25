@@ -45,6 +45,9 @@ SYSTEM_PYTHON=/usr/bin/python3
 INSTALL_DIR=/usr/local/share/throttlefed
 CLI_FILE=$INSTALL_DIR/throttlefed.py
 GUI_FILE=$INSTALL_DIR/throttlefed_gui.py
+STORE_FILE=$INSTALL_DIR/throttlefed_store.py
+PLUGINS_DIR=$INSTALL_DIR/plugins
+CONTRACT_FILE=$PLUGINS_DIR/base.py
 LAUNCHER=/usr/local/bin/throttlefed
 # The menu entry runs the GUI, the shell runs the command line tool: two names,
 # two launchers. An Exec pointing at the command line tool opens nothing.
@@ -160,6 +163,8 @@ set_source_paths() {
     HELPER_SRC=$SOURCE_DIR/src/throttlefed-helper.c
     CLI_SRC=$SOURCE_DIR/throttlefed.py
     GUI_SRC=$SOURCE_DIR/throttlefed_gui.py
+    STORE_SRC=$SOURCE_DIR/throttlefed_store.py
+    PLUGINS_SRC=$SOURCE_DIR/plugins
     POLICY_SRC=$SOURCE_DIR/data/io.github.framet.throttlefed.policy
     DESKTOP_SRC=$SOURCE_DIR/data/io.github.framet.ThrottleFed.desktop
     ICON_SRC=$SOURCE_DIR/data/io.github.framet.ThrottleFed.svg
@@ -169,7 +174,8 @@ set_source_paths() {
 
 missing_sources() {
     local path
-    for path in "$CLI_SRC" "$HELPER_SRC" "$POLICY_SRC" "$DESKTOP_SRC" "$ICON_SRC"; do
+    for path in "$CLI_SRC" "$STORE_SRC" "$PLUGINS_SRC/base.py" "$PLUGINS_SRC/store/catalog.json" \
+                "$HELPER_SRC" "$POLICY_SRC" "$DESKTOP_SRC" "$ICON_SRC"; do
         [[ -r $path ]] || printf '%s ' "$path"
     done
     if [[ $WITH_GUI == 1 ]]; then
@@ -397,6 +403,21 @@ install_app_files() {
     step 55 install "command line tool and GUI -> $INSTALL_DIR (0644)"
     run install -d -m755 "$INSTALL_DIR"
     run install -m0644 "$CLI_SRC" "$CLI_FILE"
+    # The store travels with the app. Without its module, `store` and the Plugin
+    # Store tab can only report that throttlefed_store.py is missing; without the
+    # catalog, a system install has nothing on offer.
+    run install -m0644 "$STORE_SRC" "$STORE_FILE"
+    # plugins/ is the first place the core looks for a plugin, so the contract and
+    # the catalog land where both the store and the loader read them.
+    run install -d -m755 "$PLUGINS_DIR"
+    run install -m0644 "$PLUGINS_SRC/base.py" "$CONTRACT_FILE"
+    # rm first: a reinstall would otherwise copy the catalog into the directory it
+    # is already sitting in, one level down.
+    run rm -rf "$PLUGINS_DIR/store"
+    run cp -a "$PLUGINS_SRC/store" "$PLUGINS_DIR/store"
+    run find "$PLUGINS_DIR/store" -name __pycache__ -type d -prune -exec rm -rf {} +
+    expect_mode "$STORE_FILE" 644 root:root
+    expect_mode "$CONTRACT_FILE" 644 root:root
     if [[ $WITH_GUI == 1 ]]; then
         run install -m0644 "$GUI_SRC" "$GUI_FILE"
         expect_mode "$GUI_FILE" 644 root:root
@@ -517,6 +538,9 @@ verify_install() {
     expect_mode "$HELPER" 755 root:root
     expect_mode "$POLICY" 644 root:root
     expect_mode "$CLI_FILE" 644 root:root
+    expect_mode "$STORE_FILE" 644 root:root
+    expect_mode "$CONTRACT_FILE" 644 root:root
+    expect_mode "$PLUGINS_DIR/store/catalog.json" 644 root:root
     expect_mode "$STATE_DIR" 755 root:root
     if [[ $WITH_GUI == 1 ]]; then
         expect_mode "$GUI_FILE" 644 root:root
@@ -595,7 +619,7 @@ do_uninstall() {
 do_status() {
     local path mode
     step 10 status "installed files"
-    for path in "$HELPER" "$POLICY" "$CLI_FILE" "$STATE_DIR" "$LAUNCHER" "$GUI_LAUNCHER" "$DESKTOP_FILE" "$ICON_FILE" "$FONT_DIR" "$UNIT_FILE" "$TIMER_FILE"; do
+    for path in "$HELPER" "$POLICY" "$CLI_FILE" "$STORE_FILE" "$PLUGINS_DIR" "$STATE_DIR" "$LAUNCHER" "$GUI_LAUNCHER" "$DESKTOP_FILE" "$ICON_FILE" "$FONT_DIR" "$UNIT_FILE" "$TIMER_FILE"; do
         if [[ -e $path ]]; then
             mode=$(stat -c '%a %U:%G' "$path" 2>/dev/null || printf '?')
             status_line present "$path" "$mode"

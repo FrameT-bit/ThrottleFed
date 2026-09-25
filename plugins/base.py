@@ -76,8 +76,15 @@ class Plugin:
 
     ID = ""
     NAME = ""
+    # What a front end calls the tab it gives this plugin. Empty means "use NAME".
+    TAB = ""
     VENDOR = ""
     WHY = ""
+    # The original tools this plugin is a compatibility layer for, one dict each:
+    # name, creator, repo, license, reuse, note. A front end shows them without
+    # reading this plugin's code, and they are shown, not buried: code that stands
+    # on someone else's work says whose work it is.
+    CREDITS: tuple = ()
 
     def __init__(self, ctx):
         self.ctx = ctx
@@ -112,13 +119,16 @@ class Plugin:
         return {
             "id": self.ID,
             "name": self.NAME,
+            "tab": self.TAB or self.NAME,
             "vendor": self.VENDOR,
             "why": self.WHY,
             "channels": [{"key": c.key, "label": c.label, "target": c.target,
-                          "values": c.values, "group": c.group, "role": c.role}
+                          "values": c.values, "group": c.group, "role": c.role,
+                          "why": c.why}
                          for c in self.channels()],
             "sections": [{"title": s.title, "rows": s.rows, "note": s.note}
                          for s in self.sections()],
+            "credits": [dict(c) for c in self.CREDITS],
             "warnings": self.warnings(),
         }
 
@@ -146,12 +156,20 @@ def load(ctx, directories):
         # the contract module is imported by name from inside a plugin
         if str(directory) not in sys.path:
             sys.path.insert(0, str(directory))
-        for path in sorted(directory.glob("*.py")):
-            if path.name in ("base.py", "__init__.py") or path.stem in seen:
+        # Two layouts are read here. A loose .py next to the contract is the layout of
+        # a plugin being written; a directory with a plugin.py in it is the layout of
+        # an installed one, and the directory name is the plugin id. The store's own
+        # packages sit two levels down and are therefore never imported directly: an
+        # offered plugin is not an installed one.
+        for path in sorted(directory.glob("*.py")) + sorted(directory.glob("*/plugin.py")):
+            if path.parent.name == "store":
                 continue
-            seen.add(path.stem)
+            stem = path.parent.name if path.name == "plugin.py" else path.stem
+            if path.name in ("base.py", "__init__.py") or stem in seen:
+                continue
+            seen.add(stem)
             try:
-                spec = importlib.util.spec_from_file_location(f"throttlefed_plugin_{path.stem}", path)
+                spec = importlib.util.spec_from_file_location(f"throttlefed_plugin_{stem}", path)
                 if spec is None or spec.loader is None:
                     errors.append((path.name, "cannot build an import spec"))
                     continue
