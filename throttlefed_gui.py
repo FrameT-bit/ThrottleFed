@@ -380,6 +380,18 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
+
+        # The update notice is not a page's business: it belongs to the window, so
+        # it shows whichever page is open, right under the header.
+        self.update_banner = Adw.Banner()
+        self.update_banner.set_revealed(False)
+        try:
+            self.update_banner.set_button_label("Release notes")
+            self.update_banner.connect("button-clicked", lambda *_: self._open_releases())
+        except (AttributeError, TypeError):
+            pass  # older libadwaita: the banner stays informational without a button
+        toolbar.add_top_bar(self.update_banner)
+
         toolbar.set_content(self.stack)
         self.toasts.set_child(toolbar)
         self.set_content(self.toasts)
@@ -541,17 +553,6 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         self.alerta = Adw.Banner()
         self.alerta.set_revealed(False)
         box.append(self.alerta)
-
-        # second banner, for updates: quiet, hidden until a check finds something
-        # newer, and never in the way of the warning above.
-        self.update_banner = Adw.Banner()
-        self.update_banner.set_revealed(False)
-        try:
-            self.update_banner.set_button_label("Release notes")
-            self.update_banner.connect("button-clicked", lambda *_: self._open_releases())
-        except (AttributeError, TypeError):
-            pass  # older libadwaita: the banner stays informational
-        box.append(self.update_banner)
 
         g1 = Adw.PreferencesGroup(
             title="Package budget",
