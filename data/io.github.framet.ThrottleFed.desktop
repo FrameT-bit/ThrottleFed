@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=ThrottleFed
+GenericName=Power budget control
+Comment=Control PL1/PL2, the core cap (PP0), EPP and the thermal mode
+# Exec and TryExec name the launcher the installer puts in /usr/local/bin:
+# setup.sh (or installer-backend.sh directly) installs /usr/local/bin/throttlefed-gui
+# for the GUI and /usr/local/bin/throttlefed for the command line tool.
+# Never put an absolute path from a checkout in here: it breaks on every other
+# machine and leaks the directory layout of the person who built it.
+Exec=throttlefed-gui
+TryExec=throttlefed-gui
+Icon=io.github.framet.ThrottleFed
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.framet.ThrottleFed
+Categories=System;Settings;Monitor;
+Keywords=power;PL1;PL2;EPP;throttle;iGPU;CPU;thermal;

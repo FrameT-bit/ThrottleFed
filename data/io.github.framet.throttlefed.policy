@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>ThrottleFed</vendor>
+
+  <!--
+    Authorises ONLY the helper /usr/local/libexec/throttlefed-helper.
+    auth_admin_keep: asks for the password once and reuses it for a few minutes,
+    which avoids one dialog per click in the GUI.
+
+    Single source for that path: installer-backend.sh substitutes its own
+    $HELPER variable into the exec.path annotation below while installing, and
+    then checks that the installed annotation matches the installed binary. To
+    move the helper, edit $HELPER in installer-backend.sh (and throttlefed_gui.py
+    find_helper()): the value written here is only the default.
+  -->
+  <action id="io.github.framet.throttlefed.apply">
+    <description>Control the CPU/iGPU power budget (PL1/PL2, PP0, EPP)</description>
+    <message>The administrator password is required to write the power limits</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/throttlefed-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

@@ -1,0 +1,36 @@
+# Build artefacts
+build/
+# Microbenchmarks in tools/ are compiled by hand, the binaries never ship.
+tools/burn
+tools/flops
+tools/flops_avx2
+*.o
+*.so
+
+# The privileged helper is compiled by the installer, never committed.
+throttlefed-helper
+src/throttlefed-helper
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local state and measurements. The tool writes these on the machine that runs it,
+# they describe one specific laptop and are useless (and noisy) in a repository.
+*.conf
+active.txt
+thermal.log
+*.csv
+*.png
+# ...except the brand assets, which are part of the repository.
+!assets/**/*.png
+
+# Probe scratch
+/scratch/
