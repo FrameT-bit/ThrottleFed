@@ -178,8 +178,8 @@ Those are two different claims, and they are always reported separately.
   `rps_act_freq_mhz` for the iGPU. Reported raw, without smoothing or inference.
 - **Clock, when a number has to stand up in an argument**, from APERF and MPERF, with
   the reference taken from `MSR_PLATFORM_INFO[15:8]` and cross-checked against
-  `turbostat`. That is not the CLI. It lives in `tools/`, together with the
-  saturating workload, so the claims in this README can be re-run instead of
+  `turbostat`. That is not the CLI. It lives in `tools/clock_and_clamp.py`, next to the
+  load it drives (`tools/flops.c`), so the claims in this README can be re-run instead of
   trusted.
 - **Obedience** by writing a value, reading it back, and then measuring the envelope
   again under load. A register that reads back correctly while the wattage stays put
