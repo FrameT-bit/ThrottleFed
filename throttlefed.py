@@ -60,6 +60,9 @@ IS_ROOT = os.geteuid() == 0
 GITHUB_REPO = "FrameT-bit/ThrottleFed"
 API = "https://api.github.com/repos/" + GITHUB_REPO
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases"
+# Last resort, for when the API rate limit is spent: raw.githubusercontent has no
+# such limit, and the file it serves is the one the check reads anyway.
+VERSION_RAW = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/VERSION"
 UPDATE_CACHE = (Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
                 / "throttlefed" / "update.json")
 UPDATE_TTL = 24 * 3600
@@ -2404,25 +2407,38 @@ def version_key(text):
     return tuple(int(n) for n in re.findall(r"\d+", core))
 
 
-def fetch_published():
+def fetch_published(budget=15.0):
     """(version, source, detail) for what is published upstream.
 
-    Two channels, in order: the newest release tag, then the VERSION file on the
-    main branch. The file is there so the check means something before the first
-    release is tagged; the first channel that answers with a version wins.
+    Four questions, in order: the newest release, the newest tag, the VERSION file
+    on main through the API, then the same file straight from the raw host (no rate
+    limit, so it also answers when the API quota is spent). The file means the check
+    still works before the first release is tagged. The first channel that answers
+    with a version wins, and a channel that errors out does not end the walk: a
+    dropped connection is common here and the next question may still answer, so the
+    error is reported only when no channel produced a version. budget caps the whole
+    walk, so a dead link cannot stall the caller.
     """
+    deadline = time.time() + budget
+    trouble = None
     for url, source in ((f"{API}/releases/latest", "release"),
                         (f"{API}/tags", "tag"),
-                        (f"{API}/contents/VERSION?ref=main", "branch")):
+                        (f"{API}/contents/VERSION?ref=main", "branch"),
+                        (VERSION_RAW, "branch-raw")):
         req = urllib.request.Request(url, headers={
             "User-Agent": f"throttlefed/{VERSION}",
             "Accept": "application/vnd.github+json"})
+        if time.time() >= deadline:
+            trouble = trouble or f"gave up after {budget:.0f}s with no answer"
+            break
         raw, dropped = None, None
         for attempt in (1, 2):
             # A home link drops the odd connection: one quiet retry before giving
             # up, so a single lost packet does not read as "could not check".
+            if attempt == 2 and time.time() >= deadline:
+                break
             try:
-                with urllib.request.urlopen(req, timeout=6) as resp:
+                with urllib.request.urlopen(req, timeout=5) as resp:
                     raw = resp.read().decode("utf-8", "replace")
                 break
             except urllib.error.HTTPError as exc:
@@ -2430,24 +2446,35 @@ def fetch_published():
                     raw = ""
                     break
                 if exc.code in (403, 429):
-                    return None, "error", f"GitHub rate limit or block (HTTP {exc.code})"
-                return None, "error", f"HTTP {exc.code} from {url}"
+                    # 60 requests an hour per IP without a token. Keep walking: the
+                    # raw channel below has no such limit.
+                    trouble = trouble or (f"GitHub rate limit (HTTP {exc.code}, 60 "
+                                          "requests an hour per IP)")
+                    break
+                trouble = trouble or f"HTTP {exc.code} from {url}"
+                break
             except Exception as exc:
                 dropped = exc
                 if attempt == 1:
-                    time.sleep(1)
+                    time.sleep(0.8)
         if raw is None:
-            return None, "error", f"{type(dropped).__name__}: {dropped} ({url})"
+            trouble = trouble or f"{type(dropped).__name__}: {dropped} ({url})"
+            continue
         if raw == "":
             continue  # nothing published on this channel yet
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            continue
+        if source == "branch-raw":
+            data = None  # this channel answers with the file itself, not JSON
+        else:
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                continue
         if source == "release":
             tag = (data or {}).get("tag_name") or ""
         elif source == "tag":
             tag = ((data or [{}])[0] or {}).get("name") or ""
+        elif source == "branch-raw":
+            tag = raw
         else:
             try:
                 tag = base64.b64decode((data or {}).get("content") or "").decode("utf-8", "replace")
@@ -2456,6 +2483,8 @@ def fetch_published():
         tag = (tag or "").strip().splitlines()[0].strip() if (tag or "").strip() else ""
         if tag:
             return tag.lstrip("vV"), source, f"{tag} ({source} upstream)"
+    if trouble:
+        return None, "error", trouble
     return None, "none", "nothing published yet"
 
 
@@ -2466,6 +2495,11 @@ def update_check(force=False, offline=False):
     never opens a socket. offline does not open one either: it reports the cache,
     including 'never checked'.
     """
+    if os.environ.get("THROTTLEFED_NO_UPDATE_CHECK"):
+        # Explicit opt-out: no socket, no cache read, no surprise. The command says
+        # why and exits 0, and nothing in the tool reaches the network afterwards.
+        return {"local": VERSION, "latest": None, "source": "disabled", "disabled": True,
+                "has_update": False, "from_cache": False, "checked_at": 0, "age_s": 0}
     now = time.time()
     try:
         cached = json.loads(UPDATE_CACHE.read_text())
@@ -2483,6 +2517,12 @@ def update_check(force=False, offline=False):
         out = {"checked_at": now, "latest": latest, "source": source, "detail": detail}
         if latest is None and source == "error":
             out["error"] = detail
+            # A failed check must not erase what a good one already knew: carry the
+            # last answer over, labelled, instead of throwing the knowledge away.
+            if cached.get("latest") and not cached.get("error"):
+                out["last_known"] = {"latest": cached["latest"],
+                                     "source": cached.get("source"),
+                                     "checked_at": cached.get("checked_at")}
         try:
             UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
             UPDATE_CACHE.write_text(json.dumps(out, indent=2) + "\n")
@@ -2503,20 +2543,34 @@ def cmd_update_check(args):
         print(json.dumps(res, indent=2))
     else:
         print(bold(f"throttlefed {res['local']}"))
-        if res.get("latest"):
+        if res.get("disabled"):
+            print(f"  published      : {dim('check disabled by THROTTLEFED_NO_UPDATE_CHECK')}")
+        elif res.get("latest"):
             print(f"  published      : {res['latest']}  {dim('(' + res['source'] + ')')}")
         elif res.get("error"):
             print(f"  published      : {yellow('could not check')}  {dim(res['error'])}")
+            last = res.get("last_known") or {}
+            if last.get("latest"):
+                hours = int(max(0, time.time() - (last.get("checked_at") or 0)) // 3600)
+                note = f"{last['latest']} ({last.get('source') or '?'}, {hours} h ago)"
+                print(f"  last answer    : {dim(note)}")
         else:
             print(f"  published      : {dim('nothing yet (no release, tag or VERSION upstream)')}")
-        if res.get("has_update"):
+        if res.get("disabled"):
+            print(dim("  no request was made, and none will be while that variable is set"))
+        elif res.get("has_update"):
             print(f"  updates        : {green('yes')} - {res.get('detail') or RELEASES_PAGE}")
             print(f"  how            : git pull, or take the release at {RELEASES_PAGE}")
         elif res.get("latest"):
             print("  updates        : none, this is the newest published version")
         if res.get("from_cache") and res.get("checked_at"):
             print(f"  last check     : {dim(str(res['age_s'] // 3600) + ' h ago (cached, --force to re-check)')}")
-        print(dim("  one unauthenticated HTTPS GET to GitHub; nothing about this machine is sent"))
+        if res.get("disabled"):
+            print(dim("  nothing was sent, and nothing will be while that variable is set"))
+        else:
+            print(dim("  no token and no query string: nothing about this machine is sent"))
+    if res.get("disabled"):
+        return 0
     if res.get("has_update"):
         return 1
     if res.get("error") and not res.get("latest"):

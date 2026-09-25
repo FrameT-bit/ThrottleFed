@@ -985,6 +985,13 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
             res = core.update_check(offline=True)
         except Exception as exc:
             return f"unknown ({type(exc).__name__})"
+        if res.get("error"):
+            last = res.get("last_known") or {}
+            if last.get("latest"):
+                return f"check failed, last seen {last['latest']}"
+            return f"check failed ({res['error'][:40]})"
+        if res.get("disabled"):
+            return "disabled (THROTTLEFED_NO_UPDATE_CHECK is set)"
         if res.get("source") == "none":
             return "nothing published upstream yet"
         if res.get("latest") and res.get("has_update"):
@@ -1028,8 +1035,12 @@ class ThrottleFedWindow(Adw.ApplicationWindow):
         elif res.get("error"):
             if not quiet:
                 self.toast(f"Could not check for updates: {res['error']}", 8)
-        elif not quiet and res.get("latest"):
-            self.toast(f"No newer version, this build is {res['local']}")
+        elif res.get("latest"):
+            # A fresh answer with nothing newer retires the banner: it is a claim
+            # about the last check, not a decoration that outlives its truth.
+            self.update_banner.set_revealed(False)
+            if not quiet:
+                self.toast(f"No newer version, this build is {res['local']}")
         return GLib.SOURCE_REMOVE
 
     def _open_releases(self):

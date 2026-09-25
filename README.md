@@ -204,7 +204,7 @@ python3 throttlefed.py update-check --json     # the whole answer, for scripts
 throttlefed 1.0.0
   published      : 1.0.0  (branch)
   updates        : none, this is the newest published version
-  one unauthenticated HTTPS GET to GitHub; nothing about this machine is sent
+  no token and no query string: nothing about this machine is sent
 ```
 
 Exit codes: `0` this build is the newest, `1` a newer version is published, `2` the
@@ -212,13 +212,21 @@ check could not run.
 
 What it does, exactly:
 
-- At most three requests, all to `api.github.com`, all unauthenticated and with no
-  query string: the newest release, then the newest tag, then `VERSION` on `main`.
-  The first one that answers with a version wins.
+- Four questions, in order: the newest release, the newest tag, `VERSION` on `main`
+  through `api.github.com`, then the same file straight from `raw.githubusercontent`.
+  The first one that answers with a version wins; the last one exists because the
+  unauthenticated API allows 60 requests an hour per IP and the raw host has no such
+  limit.
+- No token, no query string, no machine identifier. The whole walk is capped at 15
+  seconds, and a channel that errors out does not end it, because a home link drops
+  the odd connection and the next question may still answer.
 - The answer is cached in `$XDG_CACHE_HOME/throttlefed/update.json` for 24 hours, so
   a check that finds a fresh entry does not open a socket at all. A failure is cached
-  for 15 minutes only: one dropped connection should not be the answer for a day.
+  for 15 minutes only, and it keeps the previous answer, printed as `last answer`:
+  one dropped connection should not become the answer for a day, and it should not
+  erase what a good check already knew either.
 - `--offline` reads the cache and never opens a socket. `--force` ignores a fresh one.
+  `THROTTLEFED_NO_UPDATE_CHECK=1` turns the whole thing off.
 - Nothing is downloaded and nothing is installed. The check reports, you decide.
 
 The GUI runs the same check once a day, in a background thread, and only when the
