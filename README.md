@@ -230,12 +230,13 @@ What it does, exactly:
 - Nothing is downloaded and nothing is installed. The check reports, you decide.
 
 The GUI runs the same check once a day, in a background thread, and only when the
-cache is stale. A newer version reveals a banner whose button opens the releases
-page; a failure stays silent. The diagnostics view shows the local version and the
-result of the last check.
+cache is stale. A newer version reveals a banner under the header, on every page,
+whose button opens the releases page; a later check that finds nothing newer takes it
+back down, and a failure stays silent. The diagnostics view shows the local version
+and the result of the last check.
 
-For the maintainer: the channel is release, then tag, then the `VERSION` file on
-`main`. To publish 1.1.0, bump `VERSION` and push, or tag `v1.1.0`.
+For the maintainer: the channels are release, then tag, then `VERSION` on `main`, then
+the raw file. To publish 1.1.0, bump `VERSION` and push, or tag `v1.1.0`.
 
 ## Notes
 
